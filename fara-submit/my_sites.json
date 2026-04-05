@@ -1,0 +1,13 @@
+[
+  {
+    "id": "site1",
+    "name": "网站名称",
+    "url": "https://example.com",
+    "description_short": "简短描述，建议50字以内",
+    "description_long": "详细描述，建议100-200字",
+    "keywords": ["关键词1", "关键词2"],
+    "category": "工具",
+    "contact_email": "you@example.com",
+    "logo_url": "https://example.com/logo.png"
+  }
+]

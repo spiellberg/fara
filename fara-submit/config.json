@@ -1,0 +1,5 @@
+{
+  "fara_base_url": "http://localhost:11434/v1",
+  "fara_model": "fara-7b",
+  "fara_api_key": "ollama"
+}
