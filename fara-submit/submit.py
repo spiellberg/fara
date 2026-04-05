@@ -5,13 +5,14 @@ Fara 外链批量提交脚本 (V2.0 Hybrid-Driven)
 
 import json
 import re
-import subprocess
 import sys
+import base64
 from datetime import datetime
 from pathlib import Path
 
 import requests
 import yaml
+from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
 from utils import extract_domain
@@ -128,23 +129,43 @@ After you finish, write exactly one of the following on the last line of your ou
 - BLOCKED: <brief reason>   (if you cannot proceed for any other reason)
 """
 
-def run_fara_vision_agent(task_prompt: str, fara_cfg: dict) -> tuple[str, str]:
-    """使用 CLI 调用 fara"""
-    cmd = [
-        "fara-cli",
-        "--task", task_prompt,
-        "--base_url", fara_cfg.get("fara_base_url", "http://localhost:8000"),
-        "--model", fara_cfg.get("fara_model", "gpt-4o"),
-        "--api_key", fara_cfg.get("fara_api_key", ""),
-    ]
+def run_fara_vision_agent(page, task_prompt: str, fara_cfg: dict) -> tuple[str, str]:
+    """
+    直接调用本地 vLLM API，不再依赖外部 fara-cli
+    """
+    client = OpenAI(
+        base_url=fara_cfg.get("fara_base_url", "http://localhost:8000"),
+        api_key=fara_cfg.get("fara_api_key", "sk-xxx")
+    )
+    
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
+        # 配合 Playwright 页面截图
+        screenshot_bytes = page.screenshot(type="jpeg", quality=70)
+        base64_image = base64.b64encode(screenshot_bytes).decode("utf-8")
+        
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": task_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_image}"
+                        }
+                    }
+                ]
+            }
+        ]
+        
+        response = client.chat.completions.create(
+            model=fara_cfg.get("fara_model", "gpt-4o"),
+            messages=messages,
+            timeout=300
         )
-        output = result.stdout + result.stderr
+        output = response.choices[0].message.content or ""
+        
+        # 保持你原来的正则解析逻辑
         tail = "\n".join(output.splitlines()[-20:])
 
         if re.search(r"\bSUCCESS\b", tail):
@@ -152,15 +173,12 @@ def run_fara_vision_agent(task_prompt: str, fara_cfg: dict) -> tuple[str, str]:
         blocked = re.search(r"BLOCKED:\s*(.+)", tail)
         if blocked:
             return "manual_required", blocked.group(1).strip()
+            
         last_line = output.strip().splitlines()[-1] if output.strip() else "no output"
         return "failed", f"no clear result — last line: {last_line}"
-    except subprocess.TimeoutExpired:
-        return "manual_required", "task timeout (>300s)"
-    except FileNotFoundError:
-        return "failed", "fara-cli not found, check PATH"
+        
     except Exception as e:
         return "failed", str(e)
-
 
 # ---------------------------------------------------------------------------
 # 前置 DOM 寻路拦截器 (Phase 2 & 3)
@@ -252,7 +270,6 @@ def process_single_site(browser, target: dict, site: dict, fara_cfg: dict) -> tu
 
         # 落地判断：如果被强制跳转到了登录页
         if is_login_page(page):
-            context.close()
             return "manual_required", f"遭遇登录墙拦截，请使用 login_helper.py 录入 {domain} 凭证"
 
         # 寻路：如果当前不是表单页，尝试点击提交入口
@@ -261,31 +278,27 @@ def process_single_site(browser, target: dict, site: dict, fara_cfg: dict) -> tu
             
             # 点击之后有可能弹出了登录框，或者跳转到了登录注册页
             if is_login_page(page):
-                context.close()
                 return "manual_required", f"尝试进入表单时遇到登录墙，请使用 login_helper.py 录入 {domain} 凭证"
                 
             if not found:
-                context.close()
                 return "entry_not_found", "首页及子页未找到提交入口(表单)"
 
         # 验资拦截（放在寻路之后，确保检测的是最终落地页）
         if check_if_paid_required(page):
-            context.close()
             return "skipped_paid", "检测到付费墙关键字"
 
         real_url = page.url
+        
+        # 如果通过了所有的前置挑战，我们将保留开启网页的状态执行 Fara Vision
+        task_prompt = build_task_prompt(target, site, real_url)
+        status, reason = run_fara_vision_agent(page, task_prompt, fara_cfg)
+        return status, reason
+
     except Exception as e:
-        context.close()
         return "entry_not_found", f"访问失败或超时: {e}"
-
-    # 关闭 Page 及其所属的 Context，减轻资源并清理内存
-    context.close()
-
-    # 如果通过了所有的前置挑战，我们唤醒昂贵的 Fara 完成填写
-    task_prompt = build_task_prompt(target, site, real_url)
-    status, reason = run_fara_vision_agent(task_prompt, fara_cfg)
-    
-    return status, reason
+    finally:
+        # 清理资源
+        context.close()
 
 
 # ---------------------------------------------------------------------------
