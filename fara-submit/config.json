@@ -1,5 +1,5 @@
 {
-  "fara_base_url": "http://localhost:11434/v1",
-  "fara_model": "fara-7b",
-  "fara_api_key": "ollama"
+  "fara_base_url": "http://localhost:8000/v1",
+  "fara_model": "microsoft/Fara-7B",
+  "fara_api_key": "EMPTY"
 }

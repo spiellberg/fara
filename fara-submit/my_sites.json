@@ -1,13 +1,46 @@
 [
   {
-    "id": "site1",
-    "name": "网站名称",
-    "url": "https://example.com",
-    "description_short": "简短描述，建议50字以内",
-    "description_long": "详细描述，建议100-200字",
-    "keywords": ["关键词1", "关键词2"],
-    "category": "工具",
-    "contact_email": "you@example.com",
-    "logo_url": "https://example.com/logo.png"
+    "id": "backward_text",
+    "name": "Backward Text Generator",
+    "url": "https://www.backwardgeneratortext.com",
+    "description_short": "A simple online tool to reverse text, flip letters, and create mirror writing easily.",
+    "description_long": "Backward Text Generator is a versatile online utility designed for social media creators and puzzle enthusiasts. It allows users to reverse string order, flip text upside down, and generate mirrored content for unique styling or creative projects.",
+    "keywords": ["text reverser", "backward text", "mirror writing", "text flipper"],
+    "category": "Tool",
+    "contact_email": "admin@backwardgeneratortext.com",
+    "logo_url": "https://s3.us-east-2.amazonaws.com/www.deloris-ai.com/character/delorisai_c34f2948-30fd-11f1-9b33-4ae536c97d34.webp"
+  },
+  {
+    "id": "catan_board",
+    "name": "Catan Board Generator",
+    "url": "https://www.catanboardgenerator.io",
+    "description_short": "Generate balanced and fair maps for Settlers of Catan games instantly.",
+    "description_long": "An essential companion for Catan players. This generator creates randomized yet balanced board layouts to ensure every game is fair and competitive, preventing resource clustering and optimizing tile placement.",
+    "keywords": ["catan map", "board generator", "settlers of catan", "game layout"],
+    "category": "Game Utility",
+    "contact_email": "support@catanboardgenerator.io",
+    "logo_url": "https://s3.us-east-2.amazonaws.com/www.deloris-ai.com/character/delorisai_c25c084e-30fd-11f1-9b33-4ae536c97d34.webp"
+  },
+  {
+    "id": "reelmuse",
+    "name": "ReelMuse AI",
+    "url": "https://www.reelmuse.ai/",
+    "description_short": "AI-powered creative assistant for short-form video scripts and social media content.",
+    "description_long": "ReelMuse AI leverages advanced language models to help creators generate engaging scripts for TikTok, Reels, and Shorts. It focuses on viral hooks and structured storytelling to boost audience engagement.",
+    "keywords": ["ai video script", "short-form content", "tiktok assistant", "reel generator"],
+    "category": "AI / Video",
+    "contact_email": "hello@reelmuse.ai",
+    "logo_url": "https://s3.us-east-2.amazonaws.com/www.deloris-ai.com/character/delorisai_c2e87c48-30fd-11f1-9b33-4ae536c97d34.webp"
+  },
+  {
+    "id": "sweet_ai",
+    "name": "SweetAI Chat",
+    "url": "https://www.sweetai.chat/",
+    "description_short": "A personalized AI chat platform offering warm, supportive, and intelligent conversations.",
+    "description_long": "SweetAI is a friendly AI companion designed for natural language interaction. It provides a safe space for brainstorming, emotional support, and productivity assistance with a focus on a gentle user experience.",
+    "keywords": ["ai chat", "virtual companion", "chatbot", "ai assistant"],
+    "category": "AI / Chat",
+    "contact_email": "contact@sweetai.chat",
+    "logo_url": "https://s3.us-east-2.amazonaws.com/www.deloris-ai.com/character/delorisai_c17a6cae-30fd-11f1-9b33-4ae536c97d34.webp"
   }
 ]
