@@ -1,5 +1,5 @@
 """
-Fara 外链批量提交脚本
+Fara 外链批量提交脚本 (V2.0 Hybrid-Driven)
 用法: python submit.py
 """
 
@@ -12,6 +12,9 @@ from pathlib import Path
 
 import requests
 import yaml
+from playwright.sync_api import sync_playwright
+
+from utils import extract_domain
 
 # ---------------------------------------------------------------------------
 # 路径配置（所有文件相对于本脚本所在目录）
@@ -23,11 +26,13 @@ CONFIG_YAML = PROJECT_ROOT / "config.yaml"
 CONFIG_JSON = BASE_DIR / "config.json"
 MY_SITES_FILE = BASE_DIR / "my_sites.json"
 TARGET_SITES_FILE = BASE_DIR / "target_sites.json"
-LOG_FILE = BASE_DIR / "log.json"
+LOG_JSON_OLD = BASE_DIR / "log.json"
+LOG_JSONL = BASE_DIR / "log.jsonl"
+AUTH_DIR = BASE_DIR / "auth_states"
 
 
 # ---------------------------------------------------------------------------
-# 加载配置
+# 加载配置与日志
 # ---------------------------------------------------------------------------
 def load_configs():
     with open(CONFIG_YAML, encoding="utf-8") as f:
@@ -36,18 +41,38 @@ def load_configs():
         fara_cfg = json.load(f)
     return lark_cfg, fara_cfg
 
-
 def load_json(path: Path):
     if not path.exists():
         return []
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
+def migrate_old_log():
+    if LOG_JSON_OLD.exists() and not LOG_JSONL.exists():
+        print("[System] 检测到旧版 log.json，正在进行第一次迁移...")
+        data = load_json(LOG_JSON_OLD)
+        with open(LOG_JSONL, "w", encoding="utf-8") as f:
+            for item in data:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+        # 由于文件重要，仅重命名使其失效
+        LOG_JSON_OLD.rename(BASE_DIR / "log.json.bak")
+        print("[System] 迁移完成。")
 
-def save_log(entries: list):
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        json.dump(entries, f, ensure_ascii=False, indent=2)
+def load_jsonl_logs():
+    entries = []
+    if LOG_JSONL.exists():
+        with open(LOG_JSONL, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    entries.append(json.loads(line))
+    return entries
 
+def append_log(entry: dict):
+    with open(LOG_JSONL, "a", encoding="utf-8") as f:
+         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+def make_log_key(target_id: str, site_id: str) -> str:
+    return f"{target_id}::{site_id}"
 
 # ---------------------------------------------------------------------------
 # Lark 通知
@@ -75,13 +100,13 @@ def send_lark_alert(lark_cfg: dict, target_site_name: str, my_site_name: str,
 
 
 # ---------------------------------------------------------------------------
-# Fara 调用与输出解析
+# Fara 提示词与调用
 # ---------------------------------------------------------------------------
-def build_task_prompt(target: dict, site: dict) -> str:
+def build_task_prompt(target: dict, site: dict, real_url: str) -> str:
     keywords_str = ", ".join(site.get("keywords", []))
     notes_str = f"Additional notes: {target['notes']}" if target.get("notes") else ""
 
-    return f"""Go to {target['submit_url']} and submit a website listing using the information below.
+    return f"""Go to {real_url} and submit a website listing using the information below.
 
 Website details:
 - Name: {site['name']}
@@ -103,18 +128,14 @@ After you finish, write exactly one of the following on the last line of your ou
 - BLOCKED: <brief reason>   (if you cannot proceed for any other reason)
 """
 
-
-def run_fara_task(task: str, fara_cfg: dict) -> tuple[str, str]:
-    """
-    返回 (status, reason)
-    status: "success" | "failed" | "manual_required"
-    """
+def run_fara_vision_agent(task_prompt: str, fara_cfg: dict) -> tuple[str, str]:
+    """使用 CLI 调用 fara"""
     cmd = [
         "fara-cli",
-        "--task", task,
-        "--base_url", fara_cfg["fara_base_url"],
-        "--model", fara_cfg["fara_model"],
-        "--api_key", fara_cfg["fara_api_key"],
+        "--task", task_prompt,
+        "--base_url", fara_cfg.get("fara_base_url", "http://localhost:8000"),
+        "--model", fara_cfg.get("fara_model", "gpt-4o"),
+        "--api_key", fara_cfg.get("fara_api_key", ""),
     ]
     try:
         result = subprocess.run(
@@ -124,19 +145,15 @@ def run_fara_task(task: str, fara_cfg: dict) -> tuple[str, str]:
             timeout=300,
         )
         output = result.stdout + result.stderr
-        # 从末尾 20 行找关键词，避免中间日志干扰
         tail = "\n".join(output.splitlines()[-20:])
 
         if re.search(r"\bSUCCESS\b", tail):
             return "success", ""
-
         blocked = re.search(r"BLOCKED:\s*(.+)", tail)
         if blocked:
             return "manual_required", blocked.group(1).strip()
-
         last_line = output.strip().splitlines()[-1] if output.strip() else "no output"
         return "failed", f"no clear result — last line: {last_line}"
-
     except subprocess.TimeoutExpired:
         return "manual_required", "task timeout (>300s)"
     except FileNotFoundError:
@@ -146,66 +163,160 @@ def run_fara_task(task: str, fara_cfg: dict) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# 前置 DOM 寻路拦截器 (Phase 2 & 3)
+# ---------------------------------------------------------------------------
+# 精确匹配付费墙短语，避免误报（如 "Free Premium Tools" 之类）
+_PAID_PATTERNS = re.compile(
+    r"(submit.*?\$\s*\d|paid submission|upgrade to submit|pro plan required"
+    r"|this listing is paid|\$\d+.*?(?:submit|list|add))",
+    re.I | re.S,
+)
+
+def check_if_paid_required(page) -> bool:
+    try:
+        text = page.locator("body").inner_text(timeout=3000)
+        if _PAID_PATTERNS.search(text):
+            return True
+    except Exception:
+        pass
+    return False
+
+def sniff_submit_entry(page) -> bool:
+    """尝试在当前页面找到提交入口 <a> 并点击，成功返回 True。"""
+    try:
+        loc = page.locator(
+            "a:has-text('Submit'), a:has-text('Add'), a:has-text('Submit Tool')"
+        ).first
+        if loc.is_visible(timeout=2000):
+            loc.click()
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
+            return True
+    except Exception:
+        pass
+    return False
+
+def is_form_page(page) -> bool:
+    """判断当前页面是否已经是表单页（含 ≥2 个输入框）。"""
+    try:
+        count = page.locator("input[type='text'], input[type='url'], textarea").count()
+        return count >= 2
+    except Exception:
+        return False
+
+def process_single_site(browser, target: dict, site: dict, fara_cfg: dict) -> tuple[str, str]:
+    domain = extract_domain(target['submit_url'])
+    state_file = AUTH_DIR / f"{domain}.json"
+    
+    if not state_file.exists():
+        return "manual_required", f"无登录凭证，请先使用 login_helper.py 录入 {domain} 登录态"
+        
+    context = browser.new_context(storage_state=state_file)
+    page = context.new_page()
+    
+    try:
+        page.goto(target['submit_url'], wait_until='domcontentloaded', timeout=15000)
+
+        # 寻路：如果当前不是表单页，尝试点击提交入口
+        if not is_form_page(page):
+            found = sniff_submit_entry(page)
+            if not found:
+                context.close()
+                return "entry_not_found", "首页及子页未找到提交入口(表单)"
+
+        # 验资拦截（放在寻路之后，确保检测的是最终落地页）
+        if check_if_paid_required(page):
+            context.close()
+            return "skipped_paid", "检测到付费墙关键字"
+
+        real_url = page.url
+    except Exception as e:
+        context.close()
+        return "entry_not_found", f"访问失败或超时: {e}"
+
+    # 关闭 Page 及其所属的 Context，减轻资源并清理内存
+    context.close()
+
+    # 如果通过了所有的前置挑战，我们唤醒昂贵的 Fara 完成填写
+    task_prompt = build_task_prompt(target, site, real_url)
+    status, reason = run_fara_vision_agent(task_prompt, fara_cfg)
+    
+    return status, reason
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
-def make_log_key(target_id: str, site_id: str) -> str:
-    return f"{target_id}::{site_id}"
-
-
 def main():
+    migrate_old_log()
+    
     lark_cfg, fara_cfg = load_configs()
     my_sites = load_json(MY_SITES_FILE)
     target_sites = load_json(TARGET_SITES_FILE)
-    log_entries: list = load_json(LOG_FILE)
+    log_history = load_jsonl_logs()
 
-    # 已成功的组合，跳过不重试
+    # 免扰白名单扩充 (防止同一问题天天报警)
+    ignore_statuses = {"success", "manual_required", "skipped_paid", "entry_not_found"}
     done_keys = {
         make_log_key(e["target_site_id"], e["my_site_id"])
-        for e in log_entries
-        if e.get("status") == "success"
+        for e in log_history
+        if e.get("status") in ignore_statuses
     }
 
     total = len(target_sites) * len(my_sites)
     print(f"共 {len(target_sites)} 个导航站 × {len(my_sites)} 个网站 = {total} 个任务")
 
-    for target in target_sites:
-        for site in my_sites:
-            key = make_log_key(target["id"], site["id"])
-            if key in done_keys:
-                print(f"[跳过] {target['name']} ← {site['name']} (已成功)")
-                continue
+    new_entries: list[dict] = []   # 仅记录本次运行新增的条目
+    log_entries = log_history.copy()
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        
+        for target in target_sites:
+            for site in my_sites:
+                key = make_log_key(target["id"], site["id"])
+                if key in done_keys:
+                    print(f"[跳过] {target['name']} ← {site['name']} (之前状态已被过滤打断)")
+                    continue
 
-            print(f"\n[开始] {target['name']} ← {site['name']}")
-            task_prompt = build_task_prompt(target, site)
-            status, reason = run_fara_task(task_prompt, fara_cfg)
+                print(f"\n[开始] {target['name']} ← {site['name']}")
+                
+                status, reason = process_single_site(browser, target, site, fara_cfg)
+                
+                print(f"  结果: {status}" + (f"  原因: {reason}" if reason else ""))
 
-            print(f"  结果: {status}" + (f"  原因: {reason}" if reason else ""))
+                entry = {
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "target_site_id": target["id"],
+                    "target_site_name": target["name"],
+                    "my_site_id": site["id"],
+                    "my_site_name": site["name"],
+                    "submit_url": target["submit_url"],
+                    "status": status,
+                    "reason": reason,
+                }
+                append_log(entry)
+                log_entries.append(entry)
+                new_entries.append(entry)
+                done_keys.add(key)  # 本 session 内立刻加入，避免重复执行
 
-            # 记录日志
-            log_entries.append({
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "target_site_id": target["id"],
-                "target_site_name": target["name"],
-                "my_site_id": site["id"],
-                "my_site_name": site["name"],
-                "submit_url": target["submit_url"],
-                "status": status,
-                "reason": reason,
-            })
-            save_log(log_entries)
+                # 仅对首次新出现的 manual_required 报警
+                if status == "manual_required":
+                    send_lark_alert(lark_cfg, target["name"], site["name"], reason, target["submit_url"])
+                
+        browser.close()
 
-            # 需要人工介入时发 Lark 通知
-            if status == "manual_required":
-                send_lark_alert(lark_cfg, target["name"], site["name"],
-                                reason, target["submit_url"])
+    # 本次新增统计
+    def _count(entries, s): return sum(1 for e in entries if e["status"] == s)
+    success     = _count(new_entries, "success")
+    manual      = _count(new_entries, "manual_required")
+    failed      = _count(new_entries, "failed")
+    skipped_paid = _count(new_entries, "skipped_paid")
+    not_found   = _count(new_entries, "entry_not_found")
 
-    # 汇总
-    success = sum(1 for e in log_entries if e["status"] == "success")
-    manual = sum(1 for e in log_entries if e["status"] == "manual_required")
-    failed = sum(1 for e in log_entries if e["status"] == "failed")
-    print(f"\n完成。成功: {success}  需人工: {manual}  失败: {failed}")
-    print(f"详细记录见: {LOG_FILE}")
-
+    print(f"\n=======================================================")
+    print(f"本次运行 — 成功: {success} | 需人工介入: {manual} | 失败: {failed}")
+    print(f"付费墙过滤: {skipped_paid} | 入口未找到: {not_found}")
+    print(f"历史累计记录 {len(log_entries)} 条，详见: {LOG_JSONL}")
 
 if __name__ == "__main__":
     main()
