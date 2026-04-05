@@ -183,10 +183,16 @@ def check_if_paid_required(page) -> bool:
 
 def sniff_submit_entry(page) -> bool:
     """尝试在当前页面找到提交入口 <a> 并点击，成功返回 True。"""
+    # 精确短语，避免 "Add to Cart" / "Add Bookmark" 等无关链接被误命中
+    SUBMIT_SELECTOR = (
+        "a:has-text('Submit Site'), a:has-text('Submit Tool'), a:has-text('Submit Tool'),"
+        "a:has-text('Submit a Site'), a:has-text('Submit Your Site'),"
+        "a:has-text('Add Site'), a:has-text('Add Tool'), a:has-text('Add Your Site'),"
+        "a:has-text('List Your Site'), a:has-text('Get Listed'),"
+        "a:has-text('Submit'), a:has-text('Get Featured')"
+    )
     try:
-        loc = page.locator(
-            "a:has-text('Submit'), a:has-text('Add'), a:has-text('Submit Tool')"
-        ).first
+        loc = page.locator(SUBMIT_SELECTOR).first
         if loc.is_visible(timeout=2000):
             loc.click()
             page.wait_for_load_state("domcontentloaded", timeout=5000)
@@ -195,8 +201,35 @@ def sniff_submit_entry(page) -> bool:
         pass
     return False
 
+def is_login_page(page) -> bool:
+    """判断当前是否被阻拦在登录界面。合并 DOM 查询以减少开销。"""
+    try:
+        # 检查 URL（纯 Python，零开销）
+        url = page.url.lower()
+        # 加 (/|$|?) 边界，防止 /author/ 或 /authentic-* 被误匹配
+        if re.search(r"/(login|signin|sign-in|auth|signup|register)(/|$|\?)", url):
+            return True
+
+        # 一次性抓取页面文本 + 同时检查 password 字段，减少 DOM 往返
+        has_password = page.locator("input[type='password']").count() > 0
+        if has_password:
+            return True
+
+        text = page.locator("body").inner_text(timeout=2000)
+        if re.search(
+            r"\b(log in to submit|please log in|sign in to continue"
+            r"|login required|create an account to submit)\b",
+            text, re.I
+        ):
+            return True
+    except Exception:
+        pass
+    return False
+
 def is_form_page(page) -> bool:
-    """判断当前页面是否已经是表单页（含 ≥2 个输入框）。"""
+    """判断当前页面是否已经是表单页（排除登录页，且含 ≥2 个输入框）。"""
+    if is_login_page(page):
+        return False
     try:
         count = page.locator("input[type='text'], input[type='url'], textarea").count()
         return count >= 2
@@ -207,18 +240,30 @@ def process_single_site(browser, target: dict, site: dict, fara_cfg: dict) -> tu
     domain = extract_domain(target['submit_url'])
     state_file = AUTH_DIR / f"{domain}.json"
     
-    if not state_file.exists():
-        return "manual_required", f"无登录凭证，请先使用 login_helper.py 录入 {domain} 登录态"
+    context_options = {}
+    if state_file.exists():
+        context_options["storage_state"] = state_file
         
-    context = browser.new_context(storage_state=state_file)
+    context = browser.new_context(**context_options)
     page = context.new_page()
     
     try:
         page.goto(target['submit_url'], wait_until='domcontentloaded', timeout=15000)
 
+        # 落地判断：如果被强制跳转到了登录页
+        if is_login_page(page):
+            context.close()
+            return "manual_required", f"遭遇登录墙拦截，请使用 login_helper.py 录入 {domain} 凭证"
+
         # 寻路：如果当前不是表单页，尝试点击提交入口
         if not is_form_page(page):
             found = sniff_submit_entry(page)
+            
+            # 点击之后有可能弹出了登录框，或者跳转到了登录注册页
+            if is_login_page(page):
+                context.close()
+                return "manual_required", f"尝试进入表单时遇到登录墙，请使用 login_helper.py 录入 {domain} 凭证"
+                
             if not found:
                 context.close()
                 return "entry_not_found", "首页及子页未找到提交入口(表单)"
@@ -254,13 +299,13 @@ def main():
     target_sites = load_json(TARGET_SITES_FILE)
     log_history = load_jsonl_logs()
 
-    # 免扰白名单扩充 (防止同一问题天天报警)
+    # 免扰白名单：key -> 上次状态，dict 便于打印上次结果
     ignore_statuses = {"success", "manual_required", "skipped_paid", "entry_not_found"}
-    done_keys = {
-        make_log_key(e["target_site_id"], e["my_site_id"])
-        for e in log_history
-        if e.get("status") in ignore_statuses
-    }
+    # 同一 key 可能多次出现（重试写入），取最新一条
+    done_keys: dict[str, str] = {}
+    for e in log_history:
+        if e.get("status") in ignore_statuses:
+            done_keys[make_log_key(e["target_site_id"], e["my_site_id"])] = e["status"]
 
     total = len(target_sites) * len(my_sites)
     print(f"共 {len(target_sites)} 个导航站 × {len(my_sites)} 个网站 = {total} 个任务")
@@ -275,7 +320,7 @@ def main():
             for site in my_sites:
                 key = make_log_key(target["id"], site["id"])
                 if key in done_keys:
-                    print(f"[跳过] {target['name']} ← {site['name']} (之前状态已被过滤打断)")
+                    print(f"[跳过] {target['name']} ← {site['name']} (上次状态: {done_keys[key]})")
                     continue
 
                 print(f"\n[开始] {target['name']} ← {site['name']}")
@@ -297,7 +342,7 @@ def main():
                 append_log(entry)
                 log_entries.append(entry)
                 new_entries.append(entry)
-                done_keys.add(key)  # 本 session 内立刻加入，避免重复执行
+                done_keys[key] = status  # 本 session 内立刻写入，避免重复执行
 
                 # 仅对首次新出现的 manual_required 报警
                 if status == "manual_required":
