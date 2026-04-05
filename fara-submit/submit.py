@@ -134,8 +134,8 @@ def run_fara_vision_agent(page, task_prompt: str, fara_cfg: dict) -> tuple[str, 
     直接调用本地 vLLM API，不再依赖外部 fara-cli
     """
     client = OpenAI(
-        base_url=fara_cfg.get("fara_base_url", "http://localhost:8000"),
-        api_key=fara_cfg.get("fara_api_key", "sk-xxx")
+        base_url=fara_cfg["fara_base_url"],
+        api_key=fara_cfg["fara_api_key"]
     )
     
     try:
@@ -159,7 +159,7 @@ def run_fara_vision_agent(page, task_prompt: str, fara_cfg: dict) -> tuple[str, 
         ]
         
         response = client.chat.completions.create(
-            model=fara_cfg.get("fara_model", "gpt-4o"),
+            model=fara_cfg["fara_model"],
             messages=messages,
             timeout=300
         )
